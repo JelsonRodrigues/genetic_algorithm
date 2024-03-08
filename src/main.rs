@@ -2,13 +2,10 @@ pub mod genetic_algorithm;
 pub mod organism;
 pub mod tsp;
 
-use std::sync::Arc;
-
-use bit::BitIndex;
-use mpi::traits::CommunicatorCollectives;
 use once_cell::sync::Lazy;
 use rand::distributions::{Distribution, Uniform};
 use rayon::prelude::*;
+use std::sync::Arc;
 use tsp::TSP;
 
 use crate::organism::Organism;
@@ -19,7 +16,9 @@ const ELITE: usize = 20;
 const MUTATION_RATE: f32 = 0.1;
 const CROSSOVER_RATE: f32 = 0.9;
 
-fn main() -> Result<(), _> {
+fn main() {
+    let mut population = initialize();
+
     for i in 0..ITERATIONS {
         population =
             genetic_algorithm::ga_iteraration(population, MUTATION_RATE, CROSSOVER_RATE, ELITE);
@@ -37,7 +36,6 @@ fn main() -> Result<(), _> {
         .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
         .unwrap();
     println!("\nBest: {} {:?} ", best.0, best.1.get_path());
-    Ok(())
 }
 
 fn initialize() -> Vec<TSP> {
