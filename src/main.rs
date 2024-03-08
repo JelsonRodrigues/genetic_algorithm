@@ -2,11 +2,13 @@ pub mod genetic_algorithm;
 pub mod organism;
 pub mod tsp;
 
+use mpi::traits::{Communicator, CommunicatorCollectives, Destination, Root, Source};
 use once_cell::sync::Lazy;
-use rand::distributions::{Distribution, Uniform};
-use rayon::prelude::*;
+use rand::distributions::{uniform::UniformSampler, Distribution, Uniform};
+use rayon::{prelude::*, vec};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tsp::TSP;
+use tsp::{TspSolution, TSP};
 
 use crate::organism::Organism;
 
@@ -16,26 +18,222 @@ const ELITE: usize = 20;
 const MUTATION_RATE: f32 = 0.1;
 const CROSSOVER_RATE: f32 = 0.9;
 
+#[derive(Clone, Serialize, Deserialize)]
+enum Message {
+    Terminate,
+    Population(Vec<TspSolution>),
+    MapCreation(Vec<Vec<f32>>),
+    EvaluatedPopulation(Vec<(f32, TspSolution)>),
+}
+
+const ROOT_PROCESS: i32 = 0;
+
 fn main() {
-    let mut population = initialize();
+    let universe = mpi::initialize().unwrap();
+    let world = universe.world();
+    let rank = world.rank();
+    let size = world.size();
+    println!("Rank: {}, Size: {}", rank, size);
+    let portions = NUMBER_OF_INDIVIDUALS_PER_POPULATION / ((size - 1) as usize);
 
-    for i in 0..ITERATIONS {
-        population =
-            genetic_algorithm::ga_iteraration(population, MUTATION_RATE, CROSSOVER_RATE, ELITE);
+    if rank == ROOT_PROCESS {
+        // Initialize and broadcast the map
+        let mut tsp = initialize();
+        let distribution = rand::distributions::uniform::UniformFloat::<f32>::new(0.0, 1.0);
 
-        print!(
-            "\rIteration: {i} Best: {} {:?} ",
-            population[population.len() - ELITE].fitness(),
-            population[population.len() - ELITE].get_path()
-        );
+        println!("Root process is now going to broadcast the map");
+        let map = tsp.first().unwrap().get_map().graph_weights.to_vec();
+        let graph_weights = Arc::new(map);
+        let mut serialized =
+            bincode::serialize(&Message::MapCreation(graph_weights.to_vec())).unwrap();
+
+        world
+            .process_at_rank(rank)
+            .broadcast_into(&mut serialized.len());
+
+        world.process_at_rank(rank).broadcast_into(&mut serialized);
+
+        println!("Map is Broadcasted");
+        /*
+        for i in 0..ITERATIONS {
+            // Scatter the population to the other processes
+            tsp.par_iter()
+                .map(|value| value.get_solution().clone())
+                .chunks(portions)
+                .enumerate()
+                .for_each(|(i, chunk)| {
+                    let buffer = bincode::serialize(&Message::Population(chunk.to_vec())).unwrap();
+                    world.process_at_rank(i as i32 + 1).send(&buffer[..]);
+                });
+
+            // Gather the new population from the other processes
+            let mut eval_pop = (1..size)
+                .map(|i| {
+                    let (buffer, stats) = world.process_at_rank(i).receive_vec();
+                    let message = bincode::deserialize::<Message>(&buffer);
+
+                    if let Ok(Message::EvaluatedPopulation(evaluated_population)) = message {
+                        evaluated_population
+                    } else {
+                        panic!("Error receiving evaluated population")
+                    }
+                })
+                .reduce(|mut acc, mut evaluated_population| {
+                    acc.append(&mut evaluated_population);
+                    acc
+                })
+                .unwrap();
+
+            // Sort all the populations
+
+            eval_pop.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+
+            // Print the best ones
+
+            println!(
+                "Iteration {}, Best ones: {:?}",
+                i,
+                eval_pop[0..10]
+                    .iter()
+                    .map(|(fit, _)| fit)
+                    .collect::<Vec<_>>()
+            );
+
+            // Select the best individuals to reproduce
+            let mut tsp_population = eval_pop
+                .par_iter()
+                .cloned()
+                .map(|val| (val.0, TSP::new(graph_weights.clone(), val.1)))
+                .collect::<Vec<(f32, TSP)>>();
+
+            let mut new_population = tsp_population[ELITE..]
+                .par_windows(2)
+                .map(|window| {
+                    let first = window[0].1.clone();
+                    let second = &window[1].1;
+
+                    if distribution.sample(&mut rand::thread_rng()) < CROSSOVER_RATE {
+                        let child = first.cross_over(&second);
+                        return child;
+                    }
+
+                    return first.clone();
+                })
+                .collect::<Vec<TSP>>();
+
+            // Mutate the new_population
+            new_population.par_iter_mut().for_each(|child| {
+                if distribution.sample(&mut rand::thread_rng()) < MUTATION_RATE {
+                    child.mutate();
+                }
+            });
+
+            // Return the new population, including the elite
+            new_population.extend(
+                tsp_population[..=ELITE]
+                    .iter()
+                    .cloned()
+                    .map(|(_, individual)| individual.clone()),
+            );
+
+            tsp = new_population;
+            println!("TSP size {}", tsp.len());
+        }
+        */
+        tsp.par_iter()
+            .map(|value| value.get_solution().clone())
+            .chunks(portions)
+            .enumerate()
+            .for_each(|(i, chunk)| {
+                let buffer = bincode::serialize(&Message::Population(chunk.to_vec())).unwrap();
+                world.process_at_rank(i as i32 + 1).send(&buffer[..]);
+            });
+
+        // Gather the new population from the other processes
+        let mut eval_pop = (1..size)
+            .map(|i| {
+                let (buffer, stats) = world.process_at_rank(i).receive_vec();
+                let message = bincode::deserialize::<Message>(&buffer);
+
+                if let Ok(Message::EvaluatedPopulation(evaluated_population)) = message {
+                    evaluated_population
+                } else {
+                    panic!("Error receiving evaluated population")
+                }
+            })
+            .reduce(|mut acc, mut evaluated_population| {
+                acc.append(&mut evaluated_population);
+                acc
+            })
+            .unwrap();
+
+        // Sort all the populations
+
+        eval_pop.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+
+        // Print the best ones
+
+        eval_pop[0..10]
+            .iter()
+            .for_each(|(fit, solution)| println!("Best ones: {:?} -> {:?}", fit, solution));
+
+        (1..size).for_each(|i| {
+            let buffer = bincode::serialize(&Message::Terminate).unwrap();
+            world.process_at_rank(i).send(&buffer[..]);
+        });
+    } else {
+        let mut bytes = 0;
+        world
+            .process_at_rank(ROOT_PROCESS)
+            .broadcast_into(&mut bytes);
+
+        let mut buffer: Vec<u8> = vec![0; bytes];
+
+        world
+            .process_at_rank(ROOT_PROCESS)
+            .broadcast_into(&mut buffer);
+
+        let message = bincode::deserialize::<Message>(&buffer);
+        println!("Process {} received the message", rank);
+
+        if let Ok(Message::MapCreation(map)) = message {
+            let map = Arc::new(map);
+            println!("Process {} received the map", rank);
+            loop {
+                // Receive the population from the root process or a termination signal
+                let (buffer, stats) = world.process_at_rank(ROOT_PROCESS).receive_vec();
+                let message = bincode::deserialize::<Message>(&buffer);
+
+                if let Ok(Message::Terminate) = message {
+                    println!("Process {} received termination signal", rank);
+                    break;
+                }
+
+                if let Ok(Message::Population(population)) = message {
+                    // Evaluate the fitness function of the population
+                    let pop_tsp = population
+                        .par_iter()
+                        .cloned()
+                        .map(|individual| TSP::new(map.clone(), individual))
+                        .collect::<Vec<TSP>>();
+
+                    // Return a vec of tuples with the fitness and the individual
+                    let evaluated_population = genetic_algorithm::ga_evaluate_population(&pop_tsp)
+                        .par_iter()
+                        .map(|(fitnes, tsp)| (*fitnes, tsp.get_solution().clone()))
+                        .collect::<Vec<(f32, TspSolution)>>();
+
+                    // Send the evaluated population to the root process
+                    let serialized =
+                        bincode::serialize(&Message::EvaluatedPopulation(evaluated_population))
+                            .expect("Failed to serialize the evaluated population");
+
+                    world.process_at_rank(ROOT_PROCESS).send(&serialized);
+                }
+            }
+        }
+        println!("Process {} is done", rank);
     }
-
-    let best = population
-        .par_iter()
-        .map(|ind| (ind.fitness(), ind))
-        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
-        .unwrap();
-    println!("\nBest: {} {:?} ", best.0, best.1.get_path());
 }
 
 fn initialize() -> Vec<TSP> {

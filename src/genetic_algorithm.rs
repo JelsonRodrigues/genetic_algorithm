@@ -3,7 +3,7 @@ use rand::distributions::uniform::UniformSampler;
 use rayon::prelude::*;
 
 pub fn ga_iteraration<T>(
-    population: Vec<T>,
+    population: &Vec<T>,
     mutation_rate: f32,
     crossover_rate: f32,
     elite_size: usize,
@@ -14,10 +14,7 @@ where
     let distribution = rand::distributions::uniform::UniformFloat::<f32>::new(0.0, 1.0);
 
     // Evaluate the population
-    let mut evaluated_population = population
-        .par_iter()
-        .map(|individual| (individual.fitness(), individual))
-        .collect::<Vec<(f32, &T)>>();
+    let mut evaluated_population = ga_evaluate_population(population);
 
     // Select the best individuals to reproduce
     evaluated_population.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -55,4 +52,15 @@ where
     assert_eq!(new_population.len(), population.len());
 
     new_population
+}
+
+pub fn ga_evaluate_population<T>(population: &Vec<T>) -> Vec<(f32, &T)>
+where
+    T: Organism + Clone + Sync + Send + Sized,
+{
+    // Evaluate the population
+    population
+        .par_iter()
+        .map(|individual| (individual.fitness(), individual))
+        .collect::<Vec<(f32, &T)>>()
 }
