@@ -34,15 +34,15 @@ fn main() {
     let world = universe.world();
     let rank = world.rank();
     let size = world.size();
-    println!("Rank: {}, Size: {}", rank, size);
-    let portions = NUMBER_OF_INDIVIDUALS_PER_POPULATION / ((size - 1) as usize);
+    let portions =
+        (NUMBER_OF_INDIVIDUALS_PER_POPULATION as f32 / ((size - 1) as f32)).ceil() as usize;
 
     if rank == ROOT_PROCESS {
         // Initialize and broadcast the map
         let mut tsp = initialize();
         let distribution = rand::distributions::uniform::UniformFloat::<f32>::new(0.0, 1.0);
 
-        println!("Root process is now going to broadcast the map");
+        println!("Root process is broadcasting the map");
         let map = tsp.first().unwrap().get_map().graph_weights.to_vec();
         let graph_weights = Arc::new(map);
         let mut serialized =
@@ -55,34 +55,19 @@ fn main() {
         world
             .process_at_rank(ROOT_PROCESS)
             .broadcast_into(&mut serialized);
-
-        println!("Map is Broadcasted");
-
         for i in 0..ITERATIONS {
-            println!("Iteration {} BEGIN", i);
-
             // Scatter the population to the other processes
-            println!("Sending pieces of vector to processes");
-            // tsp.par_iter()
-            //     .map(|value| value.get_solution().clone())
-            //     .chunks(portions)
-            //     .enumerate()
             tsp.iter()
                 .map(|value| value.get_solution().clone())
                 .chunks(portions)
                 .into_iter()
                 .enumerate()
                 .for_each(|(i, chunk)| {
-                    println!("Now sending to process {}", i + 1,);
-                    // let buffer = bincode::serialize(&Message::Population(chunk.to_vec())).unwrap();
                     let buffer =
                         bincode::serialize(&Message::Population(chunk.collect_vec())).unwrap();
                     world.process_at_rank(i as i32 + 1).send(&buffer[..]);
-                    println!("sended to process {}", i + 1);
                 });
-            println!("Send finished");
 
-            println!("Receiving Results from processes");
             // Gather the new population from the other processes
             let mut eval_pop = (1..size)
                 .map(|i| {
@@ -100,7 +85,7 @@ fn main() {
                     acc
                 })
                 .unwrap();
-            println!("Receiving results finished");
+
             // Sort all the populations
 
             eval_pop.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -154,8 +139,6 @@ fn main() {
             );
 
             tsp = new_population;
-            println!("TSP size {}", tsp.len());
-            println!("Iteration {} END", i);
         }
 
         tsp.iter()
@@ -214,7 +197,6 @@ fn main() {
             .broadcast_into(&mut buffer);
 
         let message = bincode::deserialize::<Message>(&buffer);
-        println!("Process {} received the message", rank);
 
         if let Ok(Message::MapCreation(map)) = message {
             let map = Arc::new(map);
@@ -224,10 +206,7 @@ fn main() {
                 let (buffer, stats) = world.process_at_rank(ROOT_PROCESS).receive_vec();
                 let message = bincode::deserialize::<Message>(&buffer);
 
-                println!("Process {} received message, stats {:?}", rank, stats);
-
                 if let Ok(Message::Terminate) = message {
-                    println!("Process {} received termination signal", rank);
                     break;
                 }
 
@@ -250,9 +229,7 @@ fn main() {
                         bincode::serialize(&Message::EvaluatedPopulation(evaluated_population))
                             .expect("Failed to serialize the evaluated population");
 
-                    println!("Process {} will send the evaluated population", rank);
                     world.process_at_rank(ROOT_PROCESS).send(&serialized);
-                    println!("Process {} sent the evaluated population", rank);
                 }
             }
         }
