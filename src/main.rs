@@ -2,6 +2,7 @@ pub mod genetic_algorithm;
 pub mod organism;
 pub mod tsp;
 
+use itertools::Itertools;
 use mpi::traits::{Communicator, CommunicatorCollectives, Destination, Root, Source};
 use once_cell::sync::Lazy;
 use rand::distributions::{uniform::UniformSampler, Distribution, Uniform};
@@ -48,24 +49,40 @@ fn main() {
             bincode::serialize(&Message::MapCreation(graph_weights.to_vec())).unwrap();
 
         world
-            .process_at_rank(rank)
+            .process_at_rank(ROOT_PROCESS)
             .broadcast_into(&mut serialized.len());
 
-        world.process_at_rank(rank).broadcast_into(&mut serialized);
+        world
+            .process_at_rank(ROOT_PROCESS)
+            .broadcast_into(&mut serialized);
 
         println!("Map is Broadcasted");
-        /*
+
         for i in 0..ITERATIONS {
+            println!("Iteration {} BEGIN", i);
+
             // Scatter the population to the other processes
-            tsp.par_iter()
+            println!("Sending pieces of vector to processes");
+            // tsp.par_iter()
+            //     .map(|value| value.get_solution().clone())
+            //     .chunks(portions)
+            //     .enumerate()
+            tsp.iter()
                 .map(|value| value.get_solution().clone())
                 .chunks(portions)
+                .into_iter()
                 .enumerate()
                 .for_each(|(i, chunk)| {
-                    let buffer = bincode::serialize(&Message::Population(chunk.to_vec())).unwrap();
+                    println!("Now sending to process {}", i + 1,);
+                    // let buffer = bincode::serialize(&Message::Population(chunk.to_vec())).unwrap();
+                    let buffer =
+                        bincode::serialize(&Message::Population(chunk.collect_vec())).unwrap();
                     world.process_at_rank(i as i32 + 1).send(&buffer[..]);
+                    println!("sended to process {}", i + 1);
                 });
+            println!("Send finished");
 
+            println!("Receiving Results from processes");
             // Gather the new population from the other processes
             let mut eval_pop = (1..size)
                 .map(|i| {
@@ -83,7 +100,7 @@ fn main() {
                     acc
                 })
                 .unwrap();
-
+            println!("Receiving results finished");
             // Sort all the populations
 
             eval_pop.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -138,14 +155,17 @@ fn main() {
 
             tsp = new_population;
             println!("TSP size {}", tsp.len());
+            println!("Iteration {} END", i);
         }
-        */
-        tsp.par_iter()
+
+        tsp.iter()
             .map(|value| value.get_solution().clone())
             .chunks(portions)
+            .into_iter()
             .enumerate()
             .for_each(|(i, chunk)| {
-                let buffer = bincode::serialize(&Message::Population(chunk.to_vec())).unwrap();
+                // let buffer = bincode::serialize(&Message::Population(chunk.to_vec())).unwrap();
+                let buffer = bincode::serialize(&Message::Population(chunk.collect_vec())).unwrap();
                 world.process_at_rank(i as i32 + 1).send(&buffer[..]);
             });
 
@@ -204,6 +224,8 @@ fn main() {
                 let (buffer, stats) = world.process_at_rank(ROOT_PROCESS).receive_vec();
                 let message = bincode::deserialize::<Message>(&buffer);
 
+                println!("Process {} received message, stats {:?}", rank, stats);
+
                 if let Ok(Message::Terminate) = message {
                     println!("Process {} received termination signal", rank);
                     break;
@@ -228,7 +250,9 @@ fn main() {
                         bincode::serialize(&Message::EvaluatedPopulation(evaluated_population))
                             .expect("Failed to serialize the evaluated population");
 
+                    println!("Process {} will send the evaluated population", rank);
                     world.process_at_rank(ROOT_PROCESS).send(&serialized);
+                    println!("Process {} sent the evaluated population", rank);
                 }
             }
         }
